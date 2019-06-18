@@ -140,6 +140,9 @@ generic_growth_habits <- function(data,
     # Rename to data species code field
     dplyr::rename_at(dplyr::vars(SpeciesFixed), ~data_code)
 
+  generic_df <- generic_df[!generic_df[,data_code] %in%
+                             species_list[,species_code],]
+
 
   # Merge with generic species definitions
   generic.code.df <- dplyr::inner_join(
@@ -169,12 +172,22 @@ generic_growth_habits <- function(data,
   generic.code.df <- generic.code.df %>%
     dplyr::rename_at(dplyr::vars(data_code), ~species_code)
 
+  # Subset generic species that are not defined in species list
+  generic.code.df <- generic.code.df %>%
+    dplyr::filter(!dplyr::vars(data_code) %in% dplyr::select(data, data_code))
+
   # Merge with main species list
   species_generic <- dplyr::full_join(species_list, generic.code.df)
 
   # Remove Code, Prefix, and PrimaryKey if they exist
   species_generic <- species_generic[, !colnames(species_generic) %in%
     c("Code", "PrimaryKey", "Prefix", "DateLoadedInDb")]
+
+  # Remove NA in species list
+  if("SpeciesCode" %in% names(species_generic)) {
+    species_generic <- species_generic %>% subset(!is.na(SpeciesCode))
+
+  }
 
 
   return(species_generic)
@@ -198,6 +211,18 @@ species_join <- function(data, # field data,
   # Print
   print("Gathering species data")
 
+  # Set join levels, so that we can flexibly include SpeciesState
+  if ("SpeciesState" %in% names(data)) {
+    join_by <- c(data_code, "SpeciesState")
+  } else {
+    join_by <- data_code
+  }
+
+  # Somne projects use "None" to indicate "No species". Convert those to N instead
+  data <- data %>% dplyr::mutate_at(data_code,
+                                    ~stringr::str_replace(pattern = "None",
+                                                         replacement = "N",
+                                                         string = data[[data_code]]))
   ## Load species data
   species_list <- gather_species(
     species_file = species_file,
@@ -205,6 +230,41 @@ species_join <- function(data, # field data,
     growth_habit_code = growth_habit_code,
     species_growth_habit_code = species_growth_habit_code
   )
+
+  # Look for UpdatedSpecies and Update the Observation codes, if necessary
+  if ("UpdatedSpeciesCode" %in% names(species_list)) {
+    if(any(!is.na(species_list$UpdatedSpeciesCode))){
+
+      ## Rename column
+      species_list <- species_list %>%
+        dplyr::rename_at(dplyr::vars(species_code), ~data_code)
+
+      # Make sure Updated Species Code is a character vector
+      species_list$UpdatedSpeciesCode <- as.character(species_list$UpdatedSpeciesCode)
+
+      # Merge the Updated Species codes to the data
+      data_update <- dplyr::left_join(data,
+                                      dplyr::select(species_list, data_code,
+                                                    UpdatedSpeciesCode, SpeciesState),
+                                      by = join_by)
+
+      # Overwrite the original data code with any updated species codes
+      data_update <- data_update %>%
+        dplyr::mutate_at(data_code,
+                         ~dplyr::coalesce(data_update$UpdatedSpeciesCode,
+                                          data_update[[data_code]]))
+
+      # Overwrite original data with updated data
+      data = data_update %>% dplyr::select(names(data))
+
+      # Rename species_list
+      ## Rename column
+      species_list <- species_list %>%
+        dplyr::rename_at(dplyr::vars(data_code), ~species_code)
+
+
+    }
+  }
 
   ## Merge unknown codes
   species_generic <- generic_growth_habits(
@@ -236,12 +296,7 @@ species_join <- function(data, # field data,
   ## Remoe any duplicate values
   species_generic <- species_generic %>% dplyr::distinct()
 
-  # Set join levels, so that we can flexibly include SpeciesState
-  if ("SpeciesState" %in% names(data)) {
-    join_by <- c(data_code, "SpeciesState")
-  } else {
-    join_by <- data_code
-  }
+
 
 
   # Add species information to data

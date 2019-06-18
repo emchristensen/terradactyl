@@ -47,11 +47,11 @@ gather_lpi_terradat <- function(dsn) {
 
   lpi_hits_tall <- dplyr::filter(
     .data = lpi_hits_tall,
-    !is.na("code"),
-    "code" != "",
-    "code" != "None",
-    !is.na("PrimaryKey"),
-    !is.na("RecKey")
+    !is.na(code),
+    code != "",
+    code != "None",
+    !is.na(PrimaryKey),
+    !is.na(RecKey)
   )
 
 
@@ -70,8 +70,6 @@ gather_lpi_terradat <- function(dsn) {
       value = "chckbox",
       dplyr::matches("^Chkbox")
     )
-
-
 
   # Remove Woody and Herbaceous Checkbox
   lpi_chkbox_tall <- lpi_chkbox_tall[!(lpi_chkbox_tall$chckbox %in%
@@ -160,7 +158,7 @@ gather_lpi_lmf <- function(dsn,
   # remove one of the point 75’s from the data set.
   # Remove the nesw transect—that would be all rows in pintercept
   # where transect == “nesw” AND mark = 75.
-  pintercept <- pintercept %>% subset(!("MARK" == 75 & "TRANSECT" == "nesw"))
+  pintercept <- pintercept[!(pintercept$TRANSECT== "nesw" & pintercept$MARK == 75),]
 
 
   # Where there is a Soil hit, LMF records "None" in BASAL and leaves NONSOIL

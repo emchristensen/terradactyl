@@ -1,5 +1,6 @@
 # Species Checks--Check that the species list covers all observed species
-#' @param dsn_tall The observed data datasource
+#' @description Quality control species attribute lists prior to running indicator calculations.
+#' @param dsn_tall The observed data data source
 #' @param species_list_file The file path to the species list. If the dsn contains the species list, then specify the layer within the dsn.
 
 #' @export species_list_check
@@ -10,17 +11,17 @@ species_list_check <- function(dsn_tall, species_list_file, ...) {
   filter_exprs <- rlang::quos(...)
 
   # Read header information to provide subset and link between species tables
-  load(paste(dsn_tall, "header.Rdata", sep = ""))
+  header <- readRDS(paste(dsn_tall, "header.Rdata", sep = ""))
 
   # Read in LPI
-  load(paste(dsn_tall, "lpi_tall.Rdata", sep = ""))
+  lpi <- readRDS(paste(dsn_tall, "lpi_tall.Rdata", sep = ""))
 
 
   # Read in height
-  load(paste(dsn_tall, "height_tall.Rdata", sep = ""))
+  height <- readRDS(paste(dsn_tall, "height_tall.Rdata", sep = ""))
 
   # Species inventory
-  load(paste(dsn_tall, "spp_inventory_tall.Rdata", sep = ""))
+  spp_inventory <- readRDS(paste(dsn_tall, "spp_inventory_tall.Rdata", sep = ""))
 
 
   # Filter header according to filter expressions
@@ -34,7 +35,7 @@ species_list_check <- function(dsn_tall, species_list_file, ...) {
     dplyr::select(height, PrimaryKey, Species),
     dplyr::select(spp_inventory, PrimaryKey, Species)
   ) %>%
-    subset(nchar(Species) >= 3) %>%
+    subset(nchar(Species) >= 3 & Species != "None") %>%
     dplyr::distinct() %>%
     dplyr::left_join(header_sub, .) %>%
 
@@ -71,7 +72,7 @@ species_list_check <- function(dsn_tall, species_list_file, ...) {
   species_issues <- species_all_problems %>%
     dplyr::select(
       PrimaryKey, PlotID, Species, GrowthHabit, GrowthHabitSub, Duration,
-      Noxious, SpeciesState
+      Noxious, SpeciesState, source
     ) %>%
     dplyr::filter_at(
       dplyr::vars(
@@ -82,15 +83,15 @@ species_list_check <- function(dsn_tall, species_list_file, ...) {
     )
 
   species_hits <- species_issues %>%
-    dplyr::group_by(Species) %>%
-    dplyr::summarise(n_hits = n())
+    dplyr::group_by(Species, source) %>%
+    dplyr::summarise(n_hits = dplyr::n())
 
   unique_species_issues <- species_issues %>%
     dplyr::select(-PrimaryKey, -PlotID) %>%
     dplyr::distinct() %>%
-    dplyr::left_join(., species_hits, by = "Species")
+    dplyr::left_join(., species_hits, by = c("Species", "source"))
 
-
+  # Write species level problems
   write.csv(unique_species_issues,
             file = paste(dirname(species_list_file), "/",
                          unique(unique_species_issues$SpeciesState)[1],
@@ -99,7 +100,15 @@ species_list_check <- function(dsn_tall, species_list_file, ...) {
                          sep = ""
             )
   )
-
+  # Write out all data with problems
+  write.csv(species_issues,
+            file = paste(dirname(species_list_file), "/",
+                         unique(species_issues$SpeciesState)[1],
+                         "_species_missing_attributes_plots",
+                         Sys.Date(), ".csv",
+                         sep = ""
+            )
+  )
 
   # If the height was missclassified (e.g., herbaceous species in woody height,
   # drop it)
@@ -138,14 +147,23 @@ species_list_check <- function(dsn_tall, species_list_file, ...) {
 
 
   # Evaluate the codes used in the species list
-  species_list <- read.csv(species_list_file)
+  species_list <- switch(stringr::str_sub(species_list_file, start = -3),
+    "gdb" = sf::st_read(dsn = species_list_file, layer="tblStateSpecies"),
+    "csv" = read.csv(species_list_file))
+
 
   species_list <- species_list %>% dplyr::mutate_all(dplyr::funs(toupper))
 
-  growth_habit <- terradactyl::generic.codes$GrowthHabit %>% unique() %>% toupper()
-  duration <- terradactyl::generic.codes$Duration %>% unique() %>% toupper()
-  noxious <- c("YES", "NO")
-  growth_habit_sub <- terradactyl::generic.codes$GrowthHabitSub %>%
+  growth_habit <- terradactyl::species_attributes$GrowthHabit %>%
+    unique() %>% toupper()
+  duration <- terradactyl::species_attributes$Duration %>%
+    unique() %>% toupper()
+  noxious <- terradactyl::species_attributes$Noxious %>%
+    unique() %>% toupper()
+  growth_habit_sub <- terradactyl::species_attributes$GrowthHabitSub %>%
+    unique() %>%
+    toupper()
+  sg_group <- terradactyl::species_attributes$SG_Group %>%
     unique() %>%
     toupper()
 
@@ -162,6 +180,8 @@ species_list_check <- function(dsn_tall, species_list_file, ...) {
     Duration = species_list$Duration[!species_list$Duration %in% duration] %>%
       unique(),
     Noxious = species_list$Noxious[!species_list$Noxious %in% noxious] %>%
+      unique(),
+    SG_Group  = species_list$SG_Group[!species_list$SG_Group %in% sg_group] %>%
       unique()
   )
 
@@ -181,13 +201,117 @@ species_list_check <- function(dsn_tall, species_list_file, ...) {
       dplyr::mutate(Error = "Invalid Duration"),
 
     species_list %>%
-      subset(!GrowthHabit %in% growth_habit) %>%
-      dplyr::mutate(Error = "Invalid Noxious")
+      subset(!Noxious %in% noxious) %>%
+      dplyr::mutate(Error = "Invalid Noxious"),
+
+    species_list %>%
+      subset(!SG_Group %in% sg_group) %>%
+      dplyr::mutate(Error = "Invalid SG_Group")
   )
 
-  print("Check for bad species attributes")
+  write.csv(bad_attributes,
+            file = paste(dirname(species_list_file), "/",
+                         unique(unique_species_issues$SpeciesState)[1],
+                         "_bad_attributes_",
+                         Sys.Date(), ".csv",
+                         sep = ""
+            ))
 
-  return(bad_attributes)
 }
 
 ####
+
+#' @export species_list_compare
+#' @rdname species
+
+species_list_compare <- function(species_file,
+                                 folder) {
+  # Read in species list, either from csv or geodatabase
+  species_list <- switch(toupper(stringr::str_extract(species_file,
+                                                      pattern = "[A-z]{3}$")),
+                         GDB = {
+                           suppressWarnings(sf::st_read(dsn = species_file,
+                                                        layer = "tblStateSpecies"))
+                         },
+                         CSV = {
+                           read.csv(species_file, stringsAsFactors = FALSE, na.strings = c("", " "))
+                         }
+  )
+
+  # Identify the duplicated species lists
+  duplicated_species <- species_list %>%
+    dplyr::group_by(SpeciesCode) %>% dplyr::add_tally() %>%
+    dplyr::filter(n>1) %>%
+    # Select only fields of interest
+    dplyr::select(SpeciesCode, GrowthHabit, GrowthHabitSub,
+                  Duration, SG_Group, Noxious, SpeciesState) %>%
+    # convert to upper to remove unintended errors
+    dplyr::mutate_if(is.character, toupper) %>%
+    # remove any spaces to remove unintended errors
+    dplyr::mutate(SG_Group = SG_Group %>%
+                    stringr::str_replace_all(pattern = " ",
+                                             replacement = ""))
+
+ # Identify the growth habit mismatches
+  growth_habit_mismatch <- duplicated_species %>%
+    dplyr::select(SpeciesCode, GrowthHabit) %>%
+    dplyr::distinct() %>%
+    dplyr::group_by(SpeciesCode) %>% dplyr::add_tally() %>%
+    dplyr::filter(n>1) %>%
+    dplyr::select(SpeciesCode) %>%
+    dplyr::left_join(species_list) %>%
+    dplyr::distinct()
+  write.csv(growth_habit_mismatch,
+            paste(folder, "growth_habit_mismatch.csv", sep = ""))
+
+  growth_habit_sub_mismatch <- duplicated_species %>%
+    dplyr::select(SpeciesCode, GrowthHabitSub) %>%
+    dplyr::distinct() %>%
+    dplyr::group_by(SpeciesCode) %>% dplyr::add_tally() %>%
+    dplyr::filter(n>1) %>%
+    dplyr::select(SpeciesCode) %>%
+    dplyr::left_join(species_list) %>%
+    dplyr::distinct()
+  write.csv(growth_habit_sub_mismatch,
+            paste(folder, "growth_habitsub_mismatch.csv", sep = ""))
+
+  SG_Group_mismatch <- duplicated_species %>%
+    dplyr::select(SpeciesCode, SG_Group) %>%
+    dplyr::distinct() %>%
+    dplyr::group_by(SpeciesCode) %>% dplyr::add_tally() %>%
+    dplyr::filter(n>1) %>%
+    dplyr::select(SpeciesCode) %>%
+    dplyr::left_join(species_list) %>%
+    dplyr::distinct()
+  write.csv(SG_Group_mismatch,
+            paste(folder, "SG_Group_mismatch.csv", sep = ""))
+
+  duration_mismatch <- duplicated_species %>%
+    dplyr::select(SpeciesCode, Duration) %>%
+    dplyr::distinct() %>%
+    dplyr::group_by(SpeciesCode) %>% dplyr::add_tally() %>%
+    dplyr::filter(n>1) %>%
+    dplyr::select(SpeciesCode) %>%
+    dplyr::left_join(species_list) %>%
+    dplyr::distinct()
+  write.csv(duration_mismatch, paste(folder,"duration_mismatch.csv", sep = ""))
+
+  noxious_mismatch <- duplicated_species %>%
+    dplyr::select(SpeciesCode, Noxious) %>%
+    dplyr::distinct() %>%
+    dplyr::group_by(SpeciesCode) %>% dplyr::add_tally() %>%
+    dplyr::filter(n>1) %>%
+    dplyr::select(SpeciesCode) %>%
+    dplyr::left_join(species_list) %>%
+    dplyr::distinct()
+  write.csv(noxious_mismatch, paste(folder, "noxious_mismatch.csv", sep = ""))
+
+  return (list(duration_mismatch,
+               growth_habit_sub_mismatch,
+               growth_habit_mismatch,
+               SG_Group_mismatch,
+               noxious_mismatch,
+               duration_mismatch))
+
+
+}
